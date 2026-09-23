@@ -75,7 +75,7 @@ def main():
         "--mode",
         choices=["fast", "slow", "mixed"],
         default="mixed",
-        help="Profil transaksi: 'fast' (cepat), 'slow' (lambat >3s), 'mixed' (campuran realistis)",
+        help="Profil transaksi: 'fast' (cepat), 'slow' (lambat), 'mixed' (campuran realistis)",
     )
     parser.add_argument(
         "--duration",
@@ -89,6 +89,24 @@ def main():
         default=1.5,
         help="Target pengiriman request per detik (default: 1.5 req/s)",
     )
+    parser.add_argument(
+        "--slow-delay",
+        type=float,
+        default=3.0,
+        help="Durasi latensi transaksi lambat dalam detik (default: 3.0 detik)",
+    )
+    parser.add_argument(
+        "--fast-delay",
+        type=float,
+        default=0.05,
+        help="Durasi delay transaksi cepat dalam detik (default: 0.05 detik)",
+    )
+    parser.add_argument(
+        "--queries",
+        type=int,
+        default=4,
+        help="Jumlah query database yang dieksekusi pada slow transaction (default: 4)",
+    )
 
     args = parser.parse_args()
 
@@ -96,6 +114,9 @@ def main():
     print("🚀 JENNIFER APM Traffic Generator")
     print(f"Target Server : {args.url}")
     print(f"Mode          : {args.mode.upper()}")
+    print(f"Fast Delay    : {args.fast_delay} detik ({int(args.fast_delay * 1000)} ms)")
+    print(f"Slow Delay    : {args.slow_delay} detik ({int(args.slow_delay * 1000)} ms)")
+    print(f"DB Queries    : {args.queries} queries")
     print(
         f"Durasi        : {args.duration} detik"
         if args.duration > 0
@@ -113,6 +134,7 @@ def main():
     endpoints_fast = [
         ("GET", "/items?skip=0&limit=10"),
         ("GET", "/health"),
+        ("GET", f"/api/test/slow?delay={args.fast_delay}&queries=1"),
         (
             "POST",
             "/items",
@@ -149,8 +171,8 @@ def main():
                 url = f"{args.url}{path}"
             elif choice == "slow":
                 method = "GET"
-                delay = round(random.uniform(3.0, 4.2), 2)
-                url = f"{args.url}/api/test/slow?delay={delay}&queries=4"
+                delay = round(random.uniform(args.slow_delay, args.slow_delay + 0.8), 2)
+                url = f"{args.url}/api/test/slow?delay={delay}&queries={args.queries}"
                 payload = None
             else:  # error
                 method = "GET"
@@ -163,7 +185,7 @@ def main():
 
             # Klasifikasi status untuk statistik
             if res["status_code"] in [200, 201]:
-                if res["latency_ms"] >= 3000:
+                if res["latency_ms"] >= (args.slow_delay * 1000):
                     slow_count += 1
                     status_tag = "🟡 [SLOW]"
                 else:

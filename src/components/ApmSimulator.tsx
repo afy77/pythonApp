@@ -93,6 +93,13 @@ export const ApmSimulator: React.FC = () => {
   const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
   const [generatorCompleted, setGeneratorCompleted] = useState<boolean>(false);
 
+  // =========================================================================
+  // Configurable Latency Tuner States (Detik / Milliseconds)
+  // =========================================================================
+  const [slowDelaySeconds, setSlowDelaySeconds] = useState<number>(3.0); // 1.0s - 15.0s
+  const [fastDelayMs, setFastDelayMs] = useState<number>(45); // 10ms - 800ms
+  const [sqlQueriesCount, setSqlQueriesCount] = useState<number>(5); // 1 - 20 queries
+
   const generatorTimerRef = useRef<NodeJS.Timeout | null>(null);
   const requestIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -126,9 +133,10 @@ export const ApmSimulator: React.FC = () => {
         { method: 'GET', url: '/items/1' },
         { method: 'GET', url: '/' },
         { method: 'POST', url: '/items' },
+        { method: 'GET', url: `/api/test/slow?delay=${(fastDelayMs / 1000).toFixed(3)}&queries=1` },
       ];
       const ep = endpoints[Math.floor(Math.random() * endpoints.length)];
-      const responseTime = Math.floor(28 + Math.random() * 55);
+      const responseTime = Math.max(12, Math.floor(fastDelayMs + (Math.random() * 20 - 10)));
 
       // Real fetch to backend
       try {
@@ -159,37 +167,34 @@ export const ApmSimulator: React.FC = () => {
         sqlCount: ep.method === 'POST' ? 2 : 1,
         traceSteps: [
           { name: `fastapi_endpoint:${ep.url}`, type: 'method', durationMs: responseTime },
-          { name: 'crud:query_execution', type: 'method', durationMs: responseTime - 8 },
-          { name: 'SELECT items.* FROM items LIMIT 10', type: 'sql', durationMs: responseTime - 14 },
+          { name: 'crud:query_execution', type: 'method', durationMs: Math.max(5, responseTime - 8) },
+          { name: 'SELECT items.* FROM items LIMIT 10', type: 'sql', durationMs: Math.max(4, responseTime - 14) },
         ],
       };
       setTransactions((prev) => [...prev.slice(-35), txn]);
     } else if (chosenType === 'slow') {
-      // Slow transaction (>3000ms)
-      const sleepTime = 3000;
-      const queryTime = Math.floor(80 + Math.random() * 150);
+      // Slow transaction (based on custom slowDelaySeconds)
+      const sleepTime = Math.round(slowDelaySeconds * 1000);
+      const queryTime = Math.floor(40 + Math.random() * 80);
       const totalTime = sleepTime + queryTime;
 
-      // Real fetch to slow endpoint
-      fetch('http://localhost:8000/api/test/slow?delay=3.0&queries=5').catch(() => {});
+      // Real fetch to slow endpoint with custom delay and queries
+      fetch(`http://localhost:8000/api/test/slow?delay=${slowDelaySeconds}&queries=${sqlQueriesCount}`).catch(() => {});
 
       const txn: ApmTransaction = {
         id: txnId,
         timestamp: now,
         timeStr,
         method: 'GET',
-        endpoint: '/api/test/slow?delay=3.0&queries=5',
+        endpoint: `/api/test/slow?delay=${slowDelaySeconds}s&queries=${sqlQueriesCount}`,
         statusCode: 200,
         responseTimeMs: totalTime,
-        status: 'slow',
-        sqlCount: 10,
+        status: totalTime >= 3000 ? 'slow' : 'normal',
+        sqlCount: sqlQueriesCount * 2,
         traceSteps: [
           { name: 'main:simulate_slow_transaction', type: 'method', durationMs: totalTime },
-          { name: 'SELECT count(*) FROM items', type: 'sql', durationMs: 16, details: 'Iterasi query SQLite #1' },
-          { name: 'SELECT items.* FROM items LIMIT 5', type: 'sql', durationMs: 20, details: 'Iterasi query SQLite #2' },
-          { name: 'SELECT count(*) FROM items', type: 'sql', durationMs: 14, details: 'Iterasi query SQLite #3' },
-          { name: 'SELECT items.* FROM items LIMIT 5', type: 'sql', durationMs: 19, details: 'Iterasi query SQLite #4' },
-          { name: 'time.sleep(3.0)', type: 'sleep', durationMs: 3005, details: 'Simulasi slow microservice/IO latency' },
+          { name: `time.sleep(${slowDelaySeconds}s)`, type: 'sleep', durationMs: sleepTime, details: 'Custom configured latency delay' },
+          { name: `SELECT count(*) FROM items (${sqlQueriesCount}x loop)`, type: 'sql', durationMs: 20 },
         ],
       };
       setTransactions((prev) => [...prev.slice(-35), txn]);
@@ -280,23 +285,58 @@ export const ApmSimulator: React.FC = () => {
       if (generatorTimerRef.current) clearInterval(generatorTimerRef.current);
       if (requestIntervalRef.current) clearInterval(requestIntervalRef.current);
     };
-  }, [isGeneratorRunning, trafficMode, durationSeconds, trafficRate]);
+  }, [isGeneratorRunning, trafficMode, durationSeconds, trafficRate, slowDelaySeconds, fastDelayMs, sqlQueriesCount]);
 
   // Single manual execution handlers
   const executeSingleNormal = () => {
-    spawnTransaction('fast');
+    fetch(`http://localhost:8000/api/test/slow?delay=${(fastDelayMs / 1000).toFixed(3)}&queries=1`).catch(() => {});
+    const txn: ApmTransaction = {
+      id: `TXN-${Math.floor(1000 + Math.random() * 9000)}`,
+      timestamp: Date.now(),
+      timeStr: new Date().toLocaleTimeString(),
+      method: 'GET',
+      endpoint: `/api/test/slow?delay=${(fastDelayMs / 1000).toFixed(3)}s`,
+      statusCode: 200,
+      responseTimeMs: fastDelayMs,
+      status: 'normal',
+      sqlCount: 1,
+      traceSteps: [
+        { name: 'fastapi_endpoint:/items', type: 'method', durationMs: fastDelayMs },
+        { name: 'SELECT items.* FROM items LIMIT 10', type: 'sql', durationMs: Math.max(5, fastDelayMs - 12) },
+      ],
+    };
+    setTransactions((prev) => [...prev.slice(-35), txn]);
   };
 
   const executeSingleSlow = () => {
-    setActiveRunning('GET /api/test/slow');
+    setActiveRunning(`GET /api/test/slow?delay=${slowDelaySeconds}s`);
     setActiveServicesCount((c) => c + 1);
-    fetch('http://localhost:8000/api/test/slow?delay=3.0&queries=5').catch(() => {});
+    fetch(`http://localhost:8000/api/test/slow?delay=${slowDelaySeconds}&queries=${sqlQueriesCount}`).catch(() => {});
+    const totalMs = Math.round(slowDelaySeconds * 1000) + Math.floor(40 + Math.random() * 80);
     setTimeout(() => {
-      spawnTransaction('slow');
+      const txn: ApmTransaction = {
+        id: `TXN-${Math.floor(1000 + Math.random() * 9000)}`,
+        timestamp: Date.now(),
+        timeStr: new Date().toLocaleTimeString(),
+        method: 'GET',
+        endpoint: `/api/test/slow?delay=${slowDelaySeconds}s&queries=${sqlQueriesCount}`,
+        statusCode: 200,
+        responseTimeMs: totalMs,
+        status: totalMs >= 3000 ? 'slow' : 'normal',
+        sqlCount: sqlQueriesCount * 2,
+        traceSteps: [
+          { name: 'main:simulate_slow_transaction', type: 'method', durationMs: totalTimeMs(slowDelaySeconds), details: `time.sleep(${slowDelaySeconds}s)` },
+          { name: `time.sleep(${slowDelaySeconds}s)`, type: 'sleep', durationMs: Math.round(slowDelaySeconds * 1000) },
+          { name: `SELECT count(*) FROM items (${sqlQueriesCount}x)`, type: 'sql', durationMs: 25 },
+        ],
+      };
+      setTransactions((prev) => [...prev.slice(-35), txn]);
       setActiveRunning(null);
       setActiveServicesCount((c) => Math.max(0, c - 1));
-    }, 3100);
+    }, Math.min(totalMs, 4000));
   };
+
+  const totalTimeMs = (sec: number) => Math.round(sec * 1000) + 60;
 
   const executeSingleError = () => {
     fetch('http://localhost:8000/api/test/error?error_type=unhandled').catch(() => {});
@@ -337,8 +377,8 @@ export const ApmSimulator: React.FC = () => {
       ? Math.round(transactions.reduce((acc, t) => acc + t.responseTimeMs, 0) / totalCount)
       : 0;
 
-  // Max scale for X-View Y-axis is 4000ms
-  const maxY = 4000;
+  // Max scale for X-View Y-axis is dynamically adjusted based on slowDelaySeconds
+  const maxY = Math.max(4000, Math.ceil((slowDelaySeconds + 1.5) * 1000 / 1000) * 1000);
 
   return (
     <div id="apm-simulator-root" className="flex flex-col gap-6 w-full">
@@ -370,7 +410,7 @@ export const ApmSimulator: React.FC = () => {
                 )}
               </div>
               <p className="text-xs text-slate-300 mt-0.5">
-                Kirim data transaksi secara terus-menerus ke APM dengan pilihan profil kecepatan, durasi waktu, dan laju request.
+                Kirim data transaksi secara terus-menerus ke APM dengan profil kecepatan kustom, durasi waktu, dan laju request.
               </p>
             </div>
           </div>
@@ -384,6 +424,131 @@ export const ApmSimulator: React.FC = () => {
               <RotateCcw className="w-3.5 h-3.5" />
               <span>Reset X-View</span>
             </button>
+          </div>
+        </div>
+
+        {/* ========================================================================= */}
+        {/* Latency Tuner Section (Pengaturan Durasi Cepat & Lambat)                   */}
+        {/* ========================================================================= */}
+        <div className="mb-5 bg-slate-950 p-4 rounded-xl border border-cyan-900/40">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-800/80 mb-3">
+            <div className="flex items-center gap-2">
+              <Sliders className="w-4 h-4 text-cyan-400" />
+              <h4 className="text-xs font-semibold text-cyan-300 uppercase tracking-wider">
+                Pengaturan Profil Latensi Kustom (Tuning Cepat & Lambat)
+              </h4>
+            </div>
+            {/* Quick Preset Buttons */}
+            <div className="flex items-center gap-1.5 text-[11px]">
+              <span className="text-slate-400 mr-1">Preset:</span>
+              <button
+                type="button"
+                disabled={isGeneratorRunning}
+                onClick={() => { setFastDelayMs(20); setSlowDelaySeconds(2.5); setSqlQueriesCount(3); }}
+                className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[10px]"
+              >
+                ⚡ Cepat (25ms / 2.5s)
+              </button>
+              <button
+                type="button"
+                disabled={isGeneratorRunning}
+                onClick={() => { setFastDelayMs(50); setSlowDelaySeconds(3.5); setSqlQueriesCount(5); }}
+                className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[10px]"
+              >
+                ⚖️ Standar (50ms / 3.5s)
+              </button>
+              <button
+                type="button"
+                disabled={isGeneratorRunning}
+                onClick={() => { setFastDelayMs(150); setSlowDelaySeconds(8.0); setSqlQueriesCount(15); }}
+                className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[10px]"
+              >
+                🐢 Berat (150ms / 8.0s)
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* 1. Slow Transaction Delay Slider */}
+            <div className="bg-slate-900/90 p-3 rounded-lg border border-slate-800">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs font-medium text-amber-300 flex items-center gap-1">
+                  <Clock className="w-3.5 h-3.5 text-amber-400" />
+                  Durasi Transaksi Lambat:
+                </span>
+                <span className="text-xs font-mono font-bold text-amber-400 bg-amber-950/80 px-2 py-0.5 rounded border border-amber-800/60">
+                  {slowDelaySeconds} detik ({Math.round(slowDelaySeconds * 1000)} ms)
+                </span>
+              </div>
+              <input
+                type="range"
+                min="1.0"
+                max="15.0"
+                step="0.5"
+                disabled={isGeneratorRunning}
+                value={slowDelaySeconds}
+                onChange={(e) => setSlowDelaySeconds(parseFloat(e.target.value))}
+                className="w-full accent-amber-500 cursor-pointer disabled:opacity-50"
+              />
+              <div className="flex justify-between text-[10px] text-slate-400 mt-1">
+                <span>1.0 detik</span>
+                <span>15.0 detik</span>
+              </div>
+            </div>
+
+            {/* 2. Fast Transaction Delay Slider */}
+            <div className="bg-slate-900/90 p-3 rounded-lg border border-slate-800">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs font-medium text-emerald-300 flex items-center gap-1">
+                  <Zap className="w-3.5 h-3.5 text-emerald-400" />
+                  Durasi Transaksi Cepat:
+                </span>
+                <span className="text-xs font-mono font-bold text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-800/60">
+                  {fastDelayMs} ms
+                </span>
+              </div>
+              <input
+                type="range"
+                min="10"
+                max="800"
+                step="10"
+                disabled={isGeneratorRunning}
+                value={fastDelayMs}
+                onChange={(e) => setFastDelayMs(parseInt(e.target.value))}
+                className="w-full accent-emerald-500 cursor-pointer disabled:opacity-50"
+              />
+              <div className="flex justify-between text-[10px] text-slate-400 mt-1">
+                <span>10 ms (Ultra Cepat)</span>
+                <span>800 ms</span>
+              </div>
+            </div>
+
+            {/* 3. Database Queries Count Slider */}
+            <div className="bg-slate-900/90 p-3 rounded-lg border border-slate-800">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs font-medium text-blue-300 flex items-center gap-1">
+                  <Database className="w-3.5 h-3.5 text-blue-400" />
+                  Loop Query Database:
+                </span>
+                <span className="text-xs font-mono font-bold text-blue-400 bg-blue-950/80 px-2 py-0.5 rounded border border-blue-800/60">
+                  {sqlQueriesCount} queries
+                </span>
+              </div>
+              <input
+                type="range"
+                min="1"
+                max="20"
+                step="1"
+                disabled={isGeneratorRunning}
+                value={sqlQueriesCount}
+                onChange={(e) => setSqlQueriesCount(parseInt(e.target.value))}
+                className="w-full accent-blue-500 cursor-pointer disabled:opacity-50"
+              />
+              <div className="flex justify-between text-[10px] text-slate-400 mt-1">
+                <span>1 query (Ringan)</span>
+                <span>20 queries (Heavy DB Trace)</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -408,7 +573,7 @@ export const ApmSimulator: React.FC = () => {
                 } disabled:opacity-60`}
               >
                 <div className="text-[11px]">🚀 Cepat Saja</div>
-                <div className="text-[9px] opacity-80 mt-0.5">&lt;100 ms</div>
+                <div className="text-[9px] opacity-80 mt-0.5">~{fastDelayMs} ms</div>
               </button>
 
               <button
@@ -423,7 +588,7 @@ export const ApmSimulator: React.FC = () => {
                 } disabled:opacity-60`}
               >
                 <div className="text-[11px]">⏱️ Lambat Saja</div>
-                <div className="text-[9px] opacity-80 mt-0.5">&gt;3000 ms</div>
+                <div className="text-[9px] opacity-80 mt-0.5">~{slowDelaySeconds}s</div>
               </button>
 
               <button
@@ -442,9 +607,9 @@ export const ApmSimulator: React.FC = () => {
               </button>
             </div>
             <p className="text-[11px] text-slate-400 mt-2">
-              {trafficMode === 'fast' && 'Hanya transaksi cepat (GET /items, /health, POST). Titik berkumpul di bawah threshold.'}
-              {trafficMode === 'slow' && 'Hanya transaksi lambat (sleep 3 detik + query berulang). Titik berkumpul di atas Slow Threshold 3000ms.'}
-              {trafficMode === 'mixed' && 'Simulasi produksi: 70% Cepat (<100ms), 20% Lambat (>3000ms), dan 10% Exception Alert.'}
+              {trafficMode === 'fast' && `Hanya transaksi cepat (~${fastDelayMs}ms). Titik berkumpul di bawah threshold.`}
+              {trafficMode === 'slow' && `Hanya transaksi lambat (~${slowDelaySeconds}s + ${sqlQueriesCount}x loop query). Titik berkumpul di atas Slow Threshold.`}
+              {trafficMode === 'mixed' && `Simulasi produksi: 70% Cepat (~${fastDelayMs}ms), 20% Lambat (~${slowDelaySeconds}s), dan 10% Exception Alert.`}
             </p>
           </div>
 
@@ -599,7 +764,7 @@ export const ApmSimulator: React.FC = () => {
               disabled={isGeneratorRunning}
               className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-400 font-medium transition-colors border border-slate-700 disabled:opacity-50"
             >
-              +1 Normal (~45ms)
+              +1 Cepat ({fastDelayMs}ms)
             </button>
             <button
               type="button"
@@ -608,7 +773,7 @@ export const ApmSimulator: React.FC = () => {
               disabled={isGeneratorRunning || !!activeRunning}
               className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-400 font-medium transition-colors border border-slate-700 disabled:opacity-50"
             >
-              +1 Slow (~3s)
+              +1 Lambat ({slowDelaySeconds}s)
             </button>
             <button
               type="button"

@@ -168,28 +168,27 @@ def delete_item_endpoint(item_id: int, db: Session = Depends(get_db)):
     "/api/test/slow",
     response_model=schemas.SlowTestResponse,
     tags=["APM Testing"],
-    summary="Simulasi Transaksi Lambat (Slow Transaction untuk X-View JENNIFER)",
+    summary="Simulasi Transaksi Berlatensi Kustom (Slow / Fast Transaction untuk X-View JENNIFER)",
 )
 def simulate_slow_transaction(
     delay: float = Query(
         3.0,
-        ge=0.5,
-        le=30.0,
-        description="Durasi time.sleep dalam detik (default: 3 detik sesuai kriteria slow)",
+        ge=0.0,
+        le=60.0,
+        description="Durasi latency delay dalam detik (contoh: 0.05 untuk transaksi cepat, 3.5 atau 8.0 untuk transaksi lambat)",
     ),
     queries: int = Query(
         5,
-        ge=1,
+        ge=0,
         le=100,
         description="Jumlah query database berulang untuk memicu DB profiling trace",
     ),
     db: Session = Depends(get_db),
 ):
-    """Endpoint ini sengaja mengeksekusi sleep dan query database berulang.
+    """Endpoint ini mengeksekusi sleep dan query database berulang sesuai durasi kustom.
 
     Tujuan APM:
-    1. Memperlambat response time (> 3000 ms) agar muncul sebagai dot di atas
-       garis threshold Slow Transaction pada grafik JENNIFER X-View.
+    1. Mengatur posisi dot transaksi pada sumbu Y (waktu respon) pada grafik JENNIFER X-View.
     2. Menghasilkan multiple SQL Profiling Traces di JENNIFER APM Profile tab
        sehingga administrator dapat menginspeksi rincian SQL & waktu eksekusi.
     """
@@ -197,25 +196,27 @@ def simulate_slow_transaction(
 
     # 1. Eksekusi query berulang untuk menghasilkan jejak SQL di JENNIFER APM Profiler
     executed_queries_count = 0
-    for i in range(queries):
-        # Query agregasi count dan query fetch items
-        _ = db.query(models.Item).count()
-        _ = db.query(models.Item).offset(0).limit(5).all()
-        executed_queries_count += 2
+    if queries > 0:
+        for i in range(queries):
+            # Query agregasi count dan query fetch items
+            _ = db.query(models.Item).count()
+            _ = db.query(models.Item).offset(0).limit(5).all()
+            executed_queries_count += 2
 
-    # 2. Eksekusi sleep() untuk mensimulasikan latensi backend / external service delay
-    time.sleep(delay)
+    # 2. Eksekusi sleep() untuk mensimulasikan latensi kustom
+    if delay > 0:
+        time.sleep(delay)
 
     elapsed_time = round(time.perf_counter() - start_time, 4)
 
     return schemas.SlowTestResponse(
         status="completed",
-        message="Simulasi slow transaction berhasil dijalankan.",
+        message="Simulasi transaksi berlatensi kustom berhasil dijalankan.",
         delay_seconds=delay,
         database_queries_executed=executed_queries_count,
         elapsed_time_seconds=elapsed_time,
         apm_notes={
-            "expected_xview_location": f"Y-Axis latency sekitar {elapsed_time}s (di atas slow threshold 3s)",
+            "expected_xview_location": f"Y-Axis latency sekitar {elapsed_time}s",
             "sql_traces_count": executed_queries_count,
             "instruction": "Buka Dashboard JENNIFER APM -> Menu X-View -> Drag / klik titik yang muncul untuk melihat Method & SQL Trace.",
         },
