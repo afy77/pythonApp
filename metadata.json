@@ -1,0 +1,6 @@
+{
+  "name": "FastAPI CRUD & JENNIFER APM Test Suite",
+  "description": "Aplikasi CRUD Python FastAPI dengan SQLite & endpoint pengujian Slow Transaction serta Exception Alert untuk JENNIFER APM.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
